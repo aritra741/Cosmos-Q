@@ -4,7 +4,7 @@ Exposes COSMOS-Q's core memory operations as Model Context Protocol (MCP)
 tool endpoints using Server-Sent Events (SSE), making the memory system
 plug-in infrastructure for any Qwen agent.
 
-Supported tools (up to 10 MCP servers per Responses API request):
+Supported tools:
   - memory_store          : Persist a new episodic memory.
   - memory_retrieve       : Retrieve and pack memories via UACP.
   - memory_reconsolidate  : Manually trigger RTR on a specific memory.
@@ -16,8 +16,8 @@ Start the server:
     # or directly:
     python -m cosmos_q.mcp_server
 
-Then register with Qwen Responses API:
-    "mcp_servers": [{"url": "http://localhost:8765/sse", "name": "cosmos-q"}]
+Register with a Qwen agent's tool configuration:
+    tools = [{"type": "mcp", "server_url": "http://localhost:8765/sse", "name": "cosmos-q"}]
 
 Requires: pip install fastapi uvicorn sse-starlette
 """

@@ -1,9 +1,11 @@
 """Embedding pipeline for COSMOS-Q.
 
-Priority order:
-  1. Qwen Cloud text-embedding-v3 (1024-dim) via DashScope API — primary.
-  2. sentence-transformers local model — if no API key.
-  3. Hash-based deterministic fallback — if neither of the above is available.
+Backend priority:
+  1. Qwen Cloud text-embedding-v3 (1024-dim) via OpenAI-compatible SDK.
+     Same base_url as chat completions; no separate endpoint needed.
+     Docs: https://docs.qwencloud.com/api-reference/text-embedding/openai-embedding
+  2. sentence-transformers local model — when no API key is set.
+  3. Hash-based deterministic fallback — last resort.
 """
 
 from __future__ import annotations
@@ -35,50 +37,54 @@ _NEGATION_PAIRS = [
 
 class EmbeddingService:
     """
-    Produces dense embeddings.
+    Dense embeddings via text-embedding-v3 (DashScope) or local fallbacks.
 
-    Backend selection (in order):
-      - text-embedding-v3 via DashScope when COSMOS_QWEN_API_KEY is set.
-      - sentence-transformers local model as first fallback.
-      - Hash-based embedding as last resort.
+    Uses `openai.OpenAI` client for DashScope — identical SDK, different
+    base_url.  Batch size limit is 10 texts per request (Qwen Cloud docs).
     """
 
     def __init__(self, config: CosmosConfig | None = None):
         self.config = config or CosmosConfig()
         self._local_model = None
         self._backend: str | None = None  # "dashscope" | "local" | "hash"
+        self._openai_client = None
 
     @property
     def active_dim(self) -> int:
-        """Actual embedding dimension produced by the current backend."""
+        """Actual embedding dimension of the current backend."""
         self._init_backend()
         if self._backend == "dashscope":
             return self.config.embedding_dim
         return self.config.local_embedding_dim
 
+    def _get_openai_client(self):
+        if self._openai_client is None:
+            from openai import OpenAI
+            self._openai_client = OpenAI(
+                api_key=self.config.qwen_api_key,
+                base_url=self.config.qwen_base_url,
+            )
+        return self._openai_client
+
     def _init_backend(self) -> None:
         if self._backend is not None:
             return
 
-        if self.config.qwen_api_key and self.config.embedding_model == "text-embedding-v3":
-            # Verify DashScope reachability lazily — just record the intent.
-            # Actual API call happens in embed(); if it fails we fall through.
+        if self.config.qwen_api_key:
             self._backend = "dashscope"
+            logger.info("Using DashScope %s (1024-dim) for embeddings.", self.config.embedding_model)
             return
 
         try:
             from sentence_transformers import SentenceTransformer
-
             self._local_model = SentenceTransformer(self.config.local_embedding_model)
             self._backend = "local"
-            logger.info(
-                "Using local embedding model: %s", self.config.local_embedding_model
-            )
+            logger.info("Using local embedding model: %s", self.config.local_embedding_model)
         except ImportError:
             logger.warning(
-                "Neither DashScope API key nor sentence-transformers is available. "
-                "Using hash-based embedding fallback. "
-                "Set COSMOS_QWEN_API_KEY or install sentence-transformers."
+                "Neither DashScope API key nor sentence-transformers available. "
+                "Using hash-based fallback. Set COSMOS_QWEN_API_KEY or "
+                "install sentence-transformers."
             )
             self._backend = "hash"
 
@@ -86,11 +92,9 @@ class EmbeddingService:
         self._init_backend()
         if self._backend == "dashscope":
             try:
-                return self._dashscope_embed(text)
+                return self._dashscope_embed([text])[0]
             except Exception as exc:
-                logger.warning(
-                    "DashScope embedding call failed (%s); falling back to hash.", exc
-                )
+                logger.warning("DashScope embed failed (%s); falling back to hash.", exc)
                 self._backend = "hash"
         if self._backend == "local" and self._local_model is not None:
             vec = self._local_model.encode(text, normalize_embeddings=True)
@@ -101,11 +105,13 @@ class EmbeddingService:
         self._init_backend()
         if self._backend == "dashscope":
             try:
-                return self._dashscope_embed_batch(texts)
+                # DashScope batch limit: 10 texts per request
+                results: list[list[float]] = []
+                for i in range(0, len(texts), 10):
+                    results.extend(self._dashscope_embed(texts[i:i + 10]))
+                return results
             except Exception as exc:
-                logger.warning(
-                    "DashScope batch embedding failed (%s); falling back.", exc
-                )
+                logger.warning("DashScope batch embed failed (%s); falling back.", exc)
                 self._backend = "hash"
         if self._backend == "local" and self._local_model is not None:
             vecs = self._local_model.encode(texts, normalize_embeddings=True)
@@ -113,51 +119,26 @@ class EmbeddingService:
         return [self._hash_embed(t) for t in texts]
 
     # ------------------------------------------------------------------ #
-    # DashScope text-embedding-v3
+    # DashScope via OpenAI SDK
     # ------------------------------------------------------------------ #
 
-    def _dashscope_embed(self, text: str) -> list[float]:
+    def _dashscope_embed(self, texts: list[str]) -> list[list[float]]:
         """
-        Call DashScope text-embedding-v3 (1024-dim) via the OpenAI-compatible
-        embeddings endpoint.
+        Call text-embedding-v3 via the OpenAI-compatible embeddings endpoint.
 
-        API reference:
-          POST https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings
-          Model: text-embedding-v3
-          Output: 1024-dimensional float vector.
+        client.embeddings.create() — standard OpenAI SDK, no custom HTTP.
+        dimensions=1024 is the default for text-embedding-v3; also supports
+        768 and 512 (set via config.embedding_dim).
         """
-        import httpx
-
-        resp = httpx.post(
-            f"{self.config.dashscope_embedding_url}/embeddings",
-            headers={
-                "Authorization": f"Bearer {self.config.qwen_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={"model": "text-embedding-v3", "input": text, "dimensions": 1024},
-            timeout=15.0,
+        client = self._get_openai_client()
+        response = client.embeddings.create(
+            model=self.config.embedding_model,
+            input=texts,
+            dimensions=self.config.embedding_dim,
+            encoding_format="float",
         )
-        resp.raise_for_status()
-        data = resp.json()
-        vec = data["data"][0]["embedding"]
-        return self._l2_normalise(vec)
-
-    def _dashscope_embed_batch(self, texts: list[str]) -> list[list[float]]:
-        import httpx
-
-        resp = httpx.post(
-            f"{self.config.dashscope_embedding_url}/embeddings",
-            headers={
-                "Authorization": f"Bearer {self.config.qwen_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={"model": "text-embedding-v3", "input": texts, "dimensions": 1024},
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        items = sorted(data["data"], key=lambda x: x["index"])
-        return [self._l2_normalise(item["embedding"]) for item in items]
+        items = sorted(response.data, key=lambda x: x.index)
+        return [self._l2_normalise(item.embedding) for item in items]
 
     @staticmethod
     def _l2_normalise(vec: list[float]) -> list[float]:

@@ -22,34 +22,30 @@ class CosmosConfig(BaseSettings):
     # Qwen / DashScope LLM
     # --------------------------------------------------------------------- #
     qwen_api_key: str = ""
-    qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    qwen_model: str = "qwen-plus"
+    # International endpoint (Singapore region).
+    # For China (Beijing) use: https://dashscope.aliyuncs.com/compatible-mode/v1
+    qwen_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    # qwen3.7-plus: balanced quality/cost, hybrid thinking on by default.
+    # qwen3.7-max:  hardest reasoning and coding tasks.
+    # qwen3.6-flash: cost-efficient fast path.
+    qwen_model: str = "qwen3.7-plus"
 
-    # Responses API multi-turn: persisted previous_response_id per session
-    # (stored in the session state table, not an environment variable).
-    responses_api_base_url: str = "https://dashscope.aliyuncs.com/api/v1/apps"
-
-    # Session cache (10% token cost on hits, 5-min TTL refreshed on hit).
-    enable_session_cache: bool = True
-
-    # Thinking mode: use deliberate reasoning for high-stakes operations
-    # (reconsolidation, contradiction detection, schema refinement).
-    # Disable for fast operations (retrieval, embedding lookups).
-    enable_thinking: bool = False          # default: fast path
-    thinking_budget_tokens: int = 4096    # max tokens for thinking chain
+    # Thinking mode — passed as extra_body={"enable_thinking": True, "thinking_budget": N}
+    # in every OpenAI SDK call.  qwen3.7-plus has thinking ON by default at the
+    # model level; setting this to False overrides that for fast operations.
+    enable_thinking: bool = False       # override to fast path by default
+    thinking_budget_tokens: int = 4096  # max tokens for the reasoning chain
 
     # --------------------------------------------------------------------- #
-    # Embeddings
+    # Embeddings — text-embedding-v3 via OpenAI-compatible SDK
     # --------------------------------------------------------------------- #
-    # Primary: Qwen Cloud text-embedding-v3 (1024-dim, via DashScope API).
-    # Falls back to sentence-transformers, then hash, in that order.
+    # text-embedding-v3: 1024-dim (default), 768, 512.
+    # text-embedding-v4: newer, 1024-dim default, also supports sparse vectors.
+    # Both use the same base_url as chat completions; no separate endpoint needed.
     embedding_model: str = "text-embedding-v3"
     embedding_dim: int = 1024
 
-    # DashScope embedding endpoint (separate from chat completions endpoint)
-    dashscope_embedding_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
-    # Local sentence-transformers fallback model (used when no API key)
+    # Local sentence-transformers fallback (when no API key is set)
     local_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     local_embedding_dim: int = 384
 

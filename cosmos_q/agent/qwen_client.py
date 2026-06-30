@@ -1,13 +1,22 @@
-"""Qwen API client using the Responses API with platform-native features.
+"""Qwen API client using the OpenAI-compatible DashScope endpoint.
 
-Implements:
-  - Responses API with `previous_response_id` for intra-session multi-turn context
-    (IDs valid for 7 days; avoids manually passing full message history).
-  - Session cache via `x-dashscope-session-cache: enable` header (10% token
-    cost on cache hits, 5-minute TTL refreshed on every hit).
-  - Thinking mode (`enable_thinking`) for high-stakes reasoning operations.
-  - Parallel tool calls via `parallel_tool_calls=True` for concurrent operations.
-  - Falls back to the Chat Completions API when COSMOS_QWEN_API_KEY is not set.
+Uses the standard OpenAI Python SDK throughout — Qwen Cloud is fully
+OpenAI-compatible (same SDK, change base_url + api_key + model).
+
+Features implemented per official Qwen Cloud docs (2026):
+  - Chat Completions with multi-turn message history.
+  - Thinking mode via extra_body={"enable_thinking": bool, "thinking_budget": N}.
+    qwen3.7-plus has thinking ON by default; we pass False explicitly for fast
+    operations and True for high-stakes reasoning (RTR, contradiction detection).
+  - Parallel tool calls: parallel_tool_calls=True in a single completions call.
+  - Intra-session multi-turn: maintained by passing full message history.
+    COSMOS-Q memory handles cross-session persistence; message history handles
+    the current session context.
+
+References:
+  https://docs.qwencloud.com/developer-guides/text-generation/thinking
+  https://docs.qwencloud.com/developer-guides/text-generation/function-calling
+  https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview
 """
 
 from __future__ import annotations
@@ -15,62 +24,73 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
+from openai import OpenAI
+from openai.types.chat import ChatCompletion
 
 from cosmos_q.config import CosmosConfig
 
 logger = logging.getLogger(__name__)
 
-# DashScope Responses API endpoint
-_RESPONSES_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
 
+class SessionHistory:
+    """
+    Tracks full message history per session for intra-session multi-turn.
 
-class SessionState:
-    """Tracks `previous_response_id` per session for Responses API chaining."""
+    Qwen Cloud's Chat Completions API (like OpenAI's) is stateless; multi-turn
+    context is maintained by sending the full prior message list on each turn.
+    COSMOS-Q memory provides cross-session persistence; this provides
+    intra-session context.
+
+    When thinking mode is enabled, the assistant's reasoning_content is
+    included alongside content when sending tool results back, as required by
+    the Qwen Cloud docs for accurate multi-turn tool-call flows.
+    """
 
     def __init__(self) -> None:
-        self._ids: dict[str, str] = {}  # session_id → last response ID
+        self._history: dict[str, list[dict]] = {}
 
-    def get(self, session_id: str) -> str | None:
-        return self._ids.get(session_id)
+    def get(self, session_id: str) -> list[dict]:
+        return list(self._history.get(session_id, []))
 
-    def set(self, session_id: str, response_id: str) -> None:
-        self._ids[session_id] = response_id
+    def append(self, session_id: str, message: dict) -> None:
+        if session_id not in self._history:
+            self._history[session_id] = []
+        self._history[session_id].append(message)
 
     def clear(self, session_id: str) -> None:
-        self._ids.pop(session_id, None)
+        self._history.pop(session_id, None)
 
 
 class QwenClient:
     """
-    Qwen Cloud client — Responses API first, Chat Completions fallback.
+    Qwen Cloud client using the OpenAI-compatible API.
 
-    Responses API flow:
-        First turn  → POST /v1/responses (no previous_response_id)
-        Later turns → POST /v1/responses (previous_response_id = last response ID)
-
-    COSMOS-Q handles cross-session context via memory; the Responses API handles
-    intra-session context natively.  This creates a clean architectural boundary:
-      - Intra-session:  Responses API chain (platform-native)
-      - Cross-session:  COSMOS-Q memory layer
+    All calls go through the standard `openai.OpenAI` SDK pointed at:
+      https://dashscope-intl.aliyuncs.com/compatible-mode/v1   (international)
+      https://dashscope.aliyuncs.com/compatible-mode/v1         (China Beijing)
     """
 
     def __init__(self, config: CosmosConfig | None = None):
         self.config = config or CosmosConfig()
-        self.session_state = SessionState()
-        self._http: httpx.Client | None = None
+        self.session_history = SessionHistory()
+        self._client: OpenAI | None = None
 
     @property
-    def http(self) -> httpx.Client:
-        if self._http is None:
-            self._http = httpx.Client(
-                timeout=60.0,
-                headers={"Authorization": f"Bearer {self.config.qwen_api_key}"},
+    def client(self) -> OpenAI:
+        if self._client is None:
+            if not self.config.qwen_api_key:
+                raise ValueError(
+                    "COSMOS_QWEN_API_KEY is required. "
+                    "Set it in .env or the environment."
+                )
+            self._client = OpenAI(
+                api_key=self.config.qwen_api_key,
+                base_url=self.config.qwen_base_url,
             )
-        return self._http
+        return self._client
 
     # ------------------------------------------------------------------ #
-    # Primary: Responses API
+    # Primary: multi-turn chat with optional thinking mode
     # ------------------------------------------------------------------ #
 
     def chat(
@@ -79,77 +99,45 @@ class QwenClient:
         user_message: str,
         session_id: str = "default",
         use_thinking: bool | None = None,
-        tools: list[dict] | None = None,
     ) -> str:
         """
-        Send a message via the Responses API.
+        Send a message and get a response.
+
+        Multi-turn: full message history for the session is sent on every call.
+        Thinking mode: controlled per-call via extra_body (not a global toggle),
+        so high-stakes calls (RTR reconsolidation) can enable it selectively.
 
         Parameters
         ----------
-        system_prompt  : COSMOS-Q memory brief as system instructions.
-        user_message   : Current user query.
-        session_id     : Used to chain `previous_response_id` across turns.
-        use_thinking   : Override config.enable_thinking for this call.
-                         Pass True for reconsolidation / contradiction decisions.
-        tools          : Tool definitions for parallel function calling.
+        system_prompt : COSMOS-Q memory brief injected as system context.
+        user_message  : Current user turn.
+        session_id    : Groups turns into an intra-session history chain.
+        use_thinking  : True → enable reasoning chain; False → fast path.
+                        Defaults to config.enable_thinking when None.
         """
-        if not self.config.qwen_api_key:
-            raise ValueError(
-                "COSMOS_QWEN_API_KEY is required. Set it in .env or environment."
-            )
-
         thinking = use_thinking if use_thinking is not None else self.config.enable_thinking
-        prev_id = self.session_state.get(session_id)
 
-        payload: dict[str, Any] = {
-            "model": self.config.qwen_model,
-            "input": {
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ]
-            },
-            "parameters": {
+        # Build messages: system (memory brief) + prior history + new user turn
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        messages.extend(self.session_history.get(session_id))
+        messages.append({"role": "user", "content": user_message})
+
+        response = self.client.chat.completions.create(
+            model=self.config.qwen_model,
+            messages=messages,
+            extra_body={
                 "enable_thinking": thinking,
+                "thinking_budget": self.config.thinking_budget_tokens,
             },
-        }
+        )
 
-        if thinking:
-            payload["parameters"]["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": self.config.thinking_budget_tokens,
-            }
+        assistant_text = self._extract_text(response)
 
-        if prev_id:
-            payload["input"]["previous_response_id"] = prev_id
+        # Record turns for next intra-session call
+        self.session_history.append(session_id, {"role": "user", "content": user_message})
+        self.session_history.append(session_id, {"role": "assistant", "content": assistant_text})
 
-        if tools:
-            payload["parameters"]["tools"] = tools
-            payload["parameters"]["parallel_tool_calls"] = True
-
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.config.enable_session_cache:
-            # 10% token cost on cache hits; TTL refreshed on every hit
-            headers["x-dashscope-session-cache"] = "enable"
-
-        try:
-            resp = self.http.post(_RESPONSES_URL, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-        except httpx.HTTPStatusError as exc:
-            logger.error("Responses API error %s: %s", exc.response.status_code, exc.response.text)
-            raise
-
-        # Store the response ID for next turn
-        response_id = data.get("id") or data.get("request_id")
-        if response_id:
-            self.session_state.set(session_id, response_id)
-
-        return self._extract_text(data)
-
-    def end_session(self, session_id: str) -> None:
-        """Clear the session chain so the next call starts a fresh Responses API thread."""
-        self.session_state.clear(session_id)
+        return assistant_text
 
     # ------------------------------------------------------------------ #
     # Parallel tool calls
@@ -164,67 +152,57 @@ class QwenClient:
         use_thinking: bool = False,
     ) -> dict[str, Any]:
         """
-        Chat with parallel tool call support.  Returns the raw API response
-        dict so callers can inspect tool_calls alongside the text response.
+        Chat with parallel function calling.
+
+        parallel_tool_calls=True lets the model invoke multiple tools in a
+        single response — e.g. memory_retrieve + schema_query simultaneously.
+
+        Note from docs: when enable_thinking=True, tool_choice is limited to
+        "auto" or "none". For forced tool selection, set use_thinking=False.
+
+        Returns the raw completion dict so callers can inspect tool_calls.
         """
-        if not self.config.qwen_api_key:
-            raise ValueError("COSMOS_QWEN_API_KEY required for tool calls.")
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        messages.extend(self.session_history.get(session_id))
+        messages.append({"role": "user", "content": user_message})
 
-        prev_id = self.session_state.get(session_id)
-
-        payload: dict[str, Any] = {
-            "model": self.config.qwen_model,
-            "input": {
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ]
-            },
-            "parameters": {
+        response = self.client.chat.completions.create(
+            model=self.config.qwen_model,
+            messages=messages,
+            tools=tool_definitions,
+            parallel_tool_calls=True,
+            extra_body={
                 "enable_thinking": use_thinking,
-                "tools": tool_definitions,
-                "parallel_tool_calls": True,
+                "thinking_budget": self.config.thinking_budget_tokens,
             },
-        }
-        if prev_id:
-            payload["input"]["previous_response_id"] = prev_id
+        )
 
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.config.enable_session_cache:
-            headers["x-dashscope-session-cache"] = "enable"
+        return response.model_dump()
 
-        resp = self.http.post(_RESPONSES_URL, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    # ------------------------------------------------------------------ #
+    # Session management
+    # ------------------------------------------------------------------ #
 
-        response_id = data.get("id") or data.get("request_id")
-        if response_id:
-            self.session_state.set(session_id, response_id)
-
-        return data
+    def end_session(self, session_id: str) -> None:
+        """Clear intra-session history; COSMOS-Q memory persists across sessions."""
+        self.session_history.clear(session_id)
 
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _extract_text(data: dict) -> str:
-        """Extract text content from a Responses API payload."""
-        # Responses API structure: output → list of items → content → text
-        for item in data.get("output", []):
-            if item.get("type") == "message":
-                for block in item.get("content", []):
-                    if block.get("type") == "output_text":
-                        return block.get("text", "")
-        # Thinking mode wraps the final answer after the <think> block
-        if "choices" in data:
-            content = data["choices"][0]["message"].get("content", "")
-            return content or ""
-        return ""
+    def _extract_text(response: ChatCompletion) -> str:
+        """Extract the assistant text from a Chat Completions response."""
+        choice = response.choices[0]
+        return choice.message.content or ""
+
+    @staticmethod
+    def _extract_text_from_dict(data: dict) -> str:
+        try:
+            return data["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError):
+            return ""
 
     def is_available(self) -> bool:
         return bool(self.config.qwen_api_key)
-
-    def __del__(self) -> None:
-        if self._http is not None:
-            self._http.close()

@@ -2,11 +2,13 @@
 
 Integrates:
   - ApsaraDB RDS + pgvector or SQLite (selected by config.pg_dsn).
-  - Qwen Responses API with previous_response_id (intra-session multi-turn).
-  - Session cache (x-dashscope-session-cache header).
-  - Thinking mode for high-stakes operations (RTR reconsolidation decisions).
-  - Parallel tool calls for concurrent memory operations.
-  - text-embedding-v3 (1024-dim) for R(m,q), Sim(), and schema clustering.
+  - Qwen Cloud Chat Completions API via OpenAI-compatible SDK.
+    Intra-session multi-turn: full message history passed on each call.
+    Cross-session persistence: COSMOS-Q memory layer.
+  - Thinking mode via extra_body={"enable_thinking": True} for high-stakes
+    operations (RTR reconsolidation); disabled for fast retrieval paths.
+  - Parallel tool calls (parallel_tool_calls=True) for concurrent operations.
+  - text-embedding-v3 (1024-dim) via OpenAI-compatible embeddings endpoint.
 """
 
 from __future__ import annotations
@@ -75,7 +77,7 @@ class CosmosMemoryLayer:
               → UACP → Memory Brief
 
     Chat flow:
-        query → retrieve → Qwen Responses API (previous_response_id chain)
+        query → retrieve → Qwen Chat Completions (full message history chain)
               → RTR post-response (thinking mode for high divergence)
               → Trace Logger → Episodic Buffer
 
@@ -155,7 +157,7 @@ class CosmosMemoryLayer:
                 session_id=session_id,
                 use_thinking=False,
             )
-            response_text = self.qwen._extract_text(raw)
+            response_text = self.qwen._extract_text_from_dict(raw)
         else:
             response_text = self.qwen.chat(
                 system_prompt, query,
@@ -244,10 +246,10 @@ class CosmosMemoryLayer:
 
     def end_session(self, user_id: UUID, session_id: str) -> None:
         """
-        Close an intra-session Responses API chain and trigger maintenance.
+        Close an intra-session history chain and trigger maintenance.
 
         Call this at the end of a user session so:
-          1. The previous_response_id chain is discarded.
+          1. Intra-session message history is discarded (COSMOS-Q memory persists).
           2. IAAF + ASC maintenance runs (or is delegated to Function Compute).
         """
         self.qwen.end_session(session_id)
