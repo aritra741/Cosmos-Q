@@ -151,14 +151,17 @@ class CosmosMemoryLayer:
 
         response_text: str
         if use_tools and self.qwen.is_available():
+            # Responses API with MCP tool definitions (parallel_tool_calls=True).
+            # MCP tools are ONLY supported via the Responses API.
             raw = self.qwen.chat_with_tools(
                 system_prompt, query,
                 tool_definitions=_COSMOS_TOOLS,
                 session_id=session_id,
                 use_thinking=False,
             )
-            response_text = self.qwen._extract_text_from_dict(raw)
+            response_text = self.qwen._extract_responses_text(raw)
         else:
+            # Responses API: previous_response_id + session cache.
             response_text = self.qwen.chat(
                 system_prompt, query,
                 session_id=session_id,

@@ -14,34 +14,46 @@ class CosmosConfig(BaseSettings):
     # Storage backend
     # --------------------------------------------------------------------- #
     db_path: str = "cosmos_q.db"
-    # Set to use ApsaraDB RDS / PostgreSQL + pgvector instead of SQLite.
-    # Format: "postgresql://user:password@host:5432/dbname"
-    pg_dsn: str = ""
+    pg_dsn: str = ""  # postgresql://user:pass@host:5432/dbname → activates pgvector
 
     # --------------------------------------------------------------------- #
-    # Qwen / DashScope LLM
+    # Chat Completions API  (internal LLM calls: ASC summarisation, prompts)
+    # https://dashscope-intl.aliyuncs.com/compatible-mode/v1
     # --------------------------------------------------------------------- #
     qwen_api_key: str = ""
-    # International endpoint (Singapore region).
-    # For China (Beijing) use: https://dashscope.aliyuncs.com/compatible-mode/v1
     qwen_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-    # qwen3.7-plus: balanced quality/cost, hybrid thinking on by default.
-    # qwen3.7-max:  hardest reasoning and coding tasks.
-    # qwen3.6-flash: cost-efficient fast path.
+    # qwen3.7-plus  — balanced quality/cost, hybrid thinking on by default
+    # qwen3.7-max   — hardest reasoning tasks
+    # qwen3.6-flash — cost-efficient fast path
     qwen_model: str = "qwen3.7-plus"
 
-    # Thinking mode — passed as extra_body={"enable_thinking": True, "thinking_budget": N}
-    # in every OpenAI SDK call.  qwen3.7-plus has thinking ON by default at the
-    # model level; setting this to False overrides that for fast operations.
-    enable_thinking: bool = False       # override to fast path by default
-    thinking_budget_tokens: int = 4096  # max tokens for the reasoning chain
+    # --------------------------------------------------------------------- #
+    # Responses API  (MCP tools, previous_response_id multi-turn)
+    # DIFFERENT base_url from Chat Completions — required for MCP support.
+    # Docs: https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview
+    # --------------------------------------------------------------------- #
+    responses_api_base_url: str = (
+        "https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"
+    )
+
+    # Session cache — works with Responses API + previous_response_id.
+    # Header: x-dashscope-session-cache: enable
+    # Cache hits cost 10% of input token price; 5-min TTL refreshed on hit.
+    # Requires ≥1024 tokens in prompt to activate.
+    enable_session_cache: bool = True
+
+    # Thinking mode — extra_body={"enable_thinking": bool, "thinking_budget": N}.
+    # qwen3.7-plus has thinking enabled by default at the model level;
+    # setting False here overrides it for latency-sensitive paths.
+    enable_thinking: bool = False
+    thinking_budget_tokens: int = 4096
 
     # --------------------------------------------------------------------- #
     # Embeddings — text-embedding-v3 via OpenAI-compatible SDK
+    # Same base_url as Chat Completions; no separate endpoint needed.
+    # text-embedding-v3: 1024-dim default (also 768, 512)
+    # text-embedding-v4: newer option, 1024-dim default, supports sparse vectors
     # --------------------------------------------------------------------- #
-    # text-embedding-v3: 1024-dim (default), 768, 512.
-    # text-embedding-v4: newer, 1024-dim default, also supports sparse vectors.
-    # Both use the same base_url as chat completions; no separate endpoint needed.
     embedding_model: str = "text-embedding-v3"
     embedding_dim: int = 1024
 

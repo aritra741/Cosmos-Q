@@ -248,7 +248,7 @@ Return: {response, memory_brief, retrieved_count, total_tokens, session_id}
 ```
 CosmosMemoryLayer.end_session(user_id, session_id)
     │
-    ├─► SessionHistory.clear(session_id)    # drop intra-session message list
+    ├─► ResponsesSessionState.clear(session_id)  # discard previous_response_id
     │
     └─► run_maintenance(user_id)
             │
@@ -309,87 +309,156 @@ COSMOS_PG_DSN=postgresql://user:pass@host:5432/cosmos_q
 
 ## 7. Qwen Cloud Integration
 
-All Qwen Cloud calls use the **standard OpenAI Python SDK** pointed at the DashScope endpoint — no custom HTTP clients.
+COSMOS-Q uses **two distinct Qwen Cloud API surfaces** via the standard OpenAI Python SDK — same SDK, different `base_url`, different capabilities.
 
-### Chat Completions
+### API Surface Summary
+
+| API | Base URL | Used for |
+|---|---|---|
+| **Chat Completions** | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | Internal LLM calls (ASC summarisation, RTR merge prompts), embeddings |
+| **Responses API** | `https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1` | End-user chat turns, MCP tools, `previous_response_id` multi-turn |
+
+> **Important:** MCP tools (`type: "mcp"`) are **only** supported via the Responses API. They are not available through Chat Completions. Using Chat Completions for MCP tool registration is a factual error.
+
+---
+
+### 7.1 Responses API (end-user chat, MCP, multi-turn)
+
+The Responses API is Qwen Cloud's agent-first interface. COSMOS-Q uses it for all end-user chat turns.
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
+# Different base_url from Chat Completions
+responses_client = OpenAI(
+    api_key=DASHSCOPE_API_KEY,
+    base_url="https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
+)
+
+# First turn — COSMOS-Q memory brief injected as instructions
+response1 = responses_client.responses.create(
+    model="qwen3.7-plus",
+    instructions=memory_brief,          # system context from UACP
+    input="What framework did I use in project Atlas?",
+    extra_body={"enable_thinking": False},
+)
+
+# Subsequent turn — server reconstructs full context from response ID.
+# No manual message history needed; IDs are valid for 7 days.
+response2 = responses_client.responses.create(
+    model="qwen3.7-plus",
+    instructions=updated_memory_brief,
+    input="And what database was I using?",
+    previous_response_id=response1.id,  # intra-session linking
+    extra_body={"enable_thinking": False},
+)
+
+# Read response text
+text = response2.output_text           # not choices[0].message.content
+```
+
+#### Session Cache
+
+When using `previous_response_id`, enable the session cache to reduce repeated-context token costs to 10% of input price (5-min TTL, refreshed on hit, requires ≥1024 tokens in prompt):
+
+```python
+response = responses_client.responses.create(
+    model="qwen3.7-plus",
+    instructions=memory_brief,
+    input=query,
+    previous_response_id=prior_id,
+    extra_body={"enable_thinking": False},
+    extra_headers={"x-dashscope-session-cache": "enable"},
+)
+```
+
+**Two-layer token efficiency:** COSMOS-Q's UACP optimises *what* enters the context window (utility-aware selection under budget B); session cache optimises *what you pay* for the repeated context that's already there. This directly addresses RQ5 (token efficiency).
+
+#### Architectural Boundary
+
+```
+Responses API  ←  intra-session context linking  (previous_response_id, 7-day TTL)
+COSMOS-Q       ←  cross-session persistence      (MemoryNode + Schema store)
+```
+
+These two layers are complementary and non-overlapping. `previous_response_id` and `conversation` (Conversations API) are mutually exclusive.
+
+---
+
+### 7.2 Chat Completions API (internal operations)
+
+Used for stateless one-shot LLM calls where session linking is not needed: ASC schema summarisation, RTR merge prompts.
+
+```python
+completions_client = OpenAI(
     api_key=DASHSCOPE_API_KEY,
     base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
 )
 
-# Standard call (fast path, thinking off)
-response = client.chat.completions.create(
+# Internal call — thinking on for high-stakes reasoning
+response = completions_client.chat.completions.create(
     model="qwen3.7-plus",
-    messages=[{"role": "system", "content": brief}, {"role": "user", "content": query}],
-    extra_body={"enable_thinking": False},
-)
-
-# High-stakes call (thinking on — RTR reconsolidation, schema refinement)
-response = client.chat.completions.create(
-    model="qwen3.7-plus",
-    messages=messages,
+    messages=[
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ],
     extra_body={"enable_thinking": True, "thinking_budget": 4096},
 )
+text = response.choices[0].message.content
 ```
 
-### Parallel Tool Calls
+---
+
+### 7.3 Embeddings (text-embedding-v3, 1024-dim)
+
+Uses the Chat Completions base URL — same endpoint, no separate embedding URL:
 
 ```python
-response = client.chat.completions.create(
-    model="qwen3.7-plus",
-    messages=messages,
-    tools=tool_definitions,       # memory_retrieve + schema_query
-    parallel_tool_calls=True,     # both called in one model pass
-    extra_body={"enable_thinking": False},
-)
-```
-
-### Embeddings (text-embedding-v3, 1024-dim)
-
-```python
-response = client.embeddings.create(
+response = completions_client.embeddings.create(
     model="text-embedding-v3",
-    input=texts,              # up to 10 per request
-    dimensions=1024,
+    input=texts,              # up to 10 texts per request (Qwen Cloud limit)
+    dimensions=1024,          # also supports 768, 512
     encoding_format="float",
 )
 ```
 
-### Model Tiers
+---
+
+### 7.4 Thinking Mode Per Operation
+
+| Operation | API used | Thinking | Reason |
+|---|---|---|---|
+| End-user chat | Responses API | Off (default) | Latency-sensitive user path |
+| RTR reconsolidation decision | Chat Completions | Configurable (`True` recommended) | Auditable versioning reasoning |
+| ASC schema summarisation | Chat Completions | Recommended | Better schema quality |
+| Contradiction detection | Chat Completions | Recommended | Reduces false positives |
+| Retrieval / UACP scoring | None (no LLM) | — | Pure vector ops |
+
+---
+
+### 7.5 Model Tiers
 
 | Model | Use case in COSMOS-Q |
 |---|---|
-| `qwen3.7-plus` | Default chat, episodic ingestion |
-| `qwen3.7-max` | Complex schema refinement, contradiction analysis |
-| `qwen3.6-flash` | High-throughput evaluation / ablation runs |
-
-### Thinking Mode Per Operation
-
-| Operation | Thinking | Reason |
-|---|---|---|
-| `QwenClient.chat()` | Off (default) | Latency-sensitive user path |
-| `QwenClient.chat()` with RTR | Configurable | Auditable reconsolidation decisions |
-| Schema summarisation (ASC) | Recommended | Better schema quality |
-| Contradiction detection | Recommended | Reduces false positives |
-| Simple retrieval | Off | No LLM call needed |
+| `qwen3.7-plus` | Default for all paths (hybrid thinking, on by default) |
+| `qwen3.7-max` | Complex schema refinement, deep contradiction analysis |
+| `qwen3.6-flash` | High-throughput evaluation runs / ablation studies |
 
 ---
 
 ## 8. MCP Server
 
-COSMOS-Q exposes its memory operations as **Model Context Protocol (MCP)** tool endpoints, transforming it from a standalone library into infrastructure any Qwen agent can call.
+COSMOS-Q exposes its memory operations as **Model Context Protocol (MCP)** tool endpoints over SSE, transforming it from a standalone library into callable infrastructure for any Qwen agent.
 
-### Endpoints
+> **MCP requires the Responses API.** External agents must use `client.responses.create()` at the Responses API base URL to invoke MCP tools. Chat Completions does not support MCP tool type.
+
+### COSMOS-Q MCP Endpoints
 
 ```
 GET  /health           → service liveness
 GET  /tools            → tool schema discovery
-GET  /sse              → SSE stream (MCP protocol handshake)
-POST /invoke           → tool invocation
+GET  /sse              → SSE stream (MCP protocol handshake + tool list)
+POST /invoke           → direct tool invocation (internal / testing)
 ```
 
 ### Available Tools
@@ -398,34 +467,78 @@ POST /invoke           → tool invocation
 |---|---|
 | `memory_store` | Embed and persist a new episodic memory |
 | `memory_retrieve` | UACP-packed retrieval for a query → returns memory brief |
-| `memory_reconsolidate` | Apply RTR to a specific memory with new context |
+| `memory_reconsolidate` | Apply RTR to a specific memory with new context (thinking-mode enabled) |
 | `memory_forget` | Run IAAF forgetting pass for a user |
 | `schema_query` | Query schemas by type and minimum confidence |
 
-### Registration with a Qwen Agent
+### Agent Integration (Responses API)
+
+An external Qwen agent consuming COSMOS-Q as MCP infrastructure:
 
 ```python
-tools = [
-    {
-        "type": "mcp",
-        "server_url": "http://localhost:8765/sse",
-        "name": "cosmos-q"
-    }
-]
-response = client.chat.completions.create(
+from openai import OpenAI
+
+# Must use the Responses API endpoint — not Chat Completions
+client = OpenAI(
+    api_key=DASHSCOPE_API_KEY,
+    base_url="https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
+)
+
+cosmos_mcp_tool = {
+    "type": "mcp",
+    "server_protocol": "sse",
+    "server_label": "cosmos-q",
+    "server_description": (
+        "Cognitive memory layer with persistent cross-session recall. "
+        "Provides memory_store, memory_retrieve, memory_reconsolidate, "
+        "memory_forget, and schema_query operations."
+    ),
+    "server_url": "http://<ecs-host>:8765/sse",
+}
+
+# First turn
+response1 = client.responses.create(
     model="qwen3.7-plus",
-    messages=messages,
-    tools=tools,
-    parallel_tool_calls=True,
+    input="What framework did I use in project Atlas?",
+    tools=[cosmos_mcp_tool],
+    extra_headers={"x-dashscope-session-cache": "enable"},
+)
+
+# Subsequent turn — previous_response_id links context; MCP tool still available
+response2 = client.responses.create(
+    model="qwen3.7-plus",
+    input="And what database was I using?",
+    previous_response_id=response1.id,   # 7-day TTL
+    tools=[cosmos_mcp_tool],
+    extra_headers={"x-dashscope-session-cache": "enable"},
 )
 ```
 
-Start the server:
+### Start the Server
+
 ```bash
 cosmos-q mcp-server --port 8765
 # or
 cosmos-q-mcp
 ```
+
+### Production Enhancement: Qwen Conversations API
+
+For deployments requiring cross-device session continuity without managing `previous_response_id` locally, COSMOS-Q's `ResponsesSessionState` can be replaced by the Qwen Conversations API. The server manages context automatically; COSMOS-Q still handles cross-session memory.
+
+```python
+# Create a persistent conversation (no expiry on the conversation itself)
+conversation = client.conversations.create()
+
+response = client.responses.create(
+    model="qwen3.7-plus",
+    input=query,
+    conversation=conversation.id,       # server-side context management
+    instructions=memory_brief,          # COSMOS-Q memory brief as instructions
+)
+```
+
+> `conversation` and `previous_response_id` are mutually exclusive. Choose `previous_response_id` for simple chained sessions; `conversation` for cross-device or long-lived sessions.
 
 ---
 
@@ -533,8 +646,10 @@ All settings are prefixed `COSMOS_` and can be set in `.env` or the environment.
 | Variable | Default | Description |
 |---|---|---|
 | `COSMOS_QWEN_API_KEY` | `""` | DashScope API key |
-| `COSMOS_QWEN_BASE_URL` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | Chat + embedding endpoint |
+| `COSMOS_QWEN_BASE_URL` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | Chat Completions + embeddings endpoint |
+| `COSMOS_RESPONSES_API_BASE_URL` | `https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1` | Responses API endpoint (MCP, multi-turn) |
 | `COSMOS_QWEN_MODEL` | `qwen3.7-plus` | LLM model |
+| `COSMOS_ENABLE_SESSION_CACHE` | `true` | Session cache header on Responses API calls |
 | `COSMOS_ENABLE_THINKING` | `false` | Global thinking mode default |
 | `COSMOS_THINKING_BUDGET_TOKENS` | `4096` | Max reasoning tokens |
 | `COSMOS_EMBEDDING_MODEL` | `text-embedding-v3` | DashScope embedding model |
