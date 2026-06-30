@@ -1,0 +1,47 @@
+ROSTemplateFormatVersion: '2015-09-01'
+Transform: 'Aliyun::Serverless-2018-04-03'
+
+Description: COSMOS-Q Asynchronous Schema Consolidation — Alibaba Cloud Function Compute
+
+Resources:
+  cosmos-q-asc:
+    Type: 'Aliyun::Serverless::Service'
+    Properties:
+      Description: 'COSMOS-Q ASC background consolidation service'
+      InternetAccess: true
+    consolidation-trigger:
+      Type: 'Aliyun::Serverless::Function'
+      Properties:
+        Handler: cosmos_q.function_compute.asc_handler.handler
+        Runtime: python3.10
+        CodeUri: .
+        MemorySize: 512
+        Timeout: 300
+        Description: 'Run IAAF + ASC maintenance for a user on session end'
+        EnvironmentVariables:
+          COSMOS_QWEN_API_KEY:
+            Ref: QwenApiKey
+          COSMOS_PG_DSN:
+            Ref: PgDsn
+      Events:
+        # Trigger via HTTP (session end webhook)
+        HttpTrigger:
+          Type: HTTP
+          Properties:
+            AuthType: ANONYMOUS
+            Methods: ['POST']
+        # Daily scheduled consolidation for all users
+        ScheduleTrigger:
+          Type: Timer
+          Properties:
+            CronExpression: '0 3 * * *'  # 03:00 UTC daily
+            Enable: true
+            Payload: '{"user_id": "all", "trigger": "scheduled"}'
+
+Parameters:
+  QwenApiKey:
+    Type: String
+    NoEcho: true
+  PgDsn:
+    Type: String
+    NoEcho: true

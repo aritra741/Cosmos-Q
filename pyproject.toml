@@ -16,11 +16,30 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Local embedding fallback (not needed when using text-embedding-v3 via API)
 embeddings = ["sentence-transformers>=2.2"]
-dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+# ApsaraDB RDS + pgvector backend
+pg = ["psycopg2-binary>=2.9", "pgvector>=0.2"]
+# MCP server (exposes memory tools as SSE endpoints for Qwen agents)
+mcp = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "sse-starlette>=1.8"]
+# Full install
+all = [
+    "sentence-transformers>=2.2",
+    "psycopg2-binary>=2.9",
+    "pgvector>=0.2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "sse-starlette>=1.8",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "sentence-transformers>=2.2",
+]
 
 [project.scripts]
 cosmos-q = "cosmos_q.cli:main"
+cosmos-q-mcp = "cosmos_q.mcp_server:run_server"
 
 [tool.setuptools.packages.find]
 where = ["."]

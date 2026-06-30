@@ -62,10 +62,32 @@ def main() -> None:
         "--output", default=None, help="Write JSON results to file"
     )
 
+    mcp_p = sub.add_parser(
+        "mcp-server",
+        help=(
+            "Start the MCP server exposing COSMOS-Q operations as SSE tool "
+            "endpoints callable by Qwen agents."
+        ),
+    )
+    mcp_p.add_argument("--host", default=None, help="Bind host (default: config value)")
+    mcp_p.add_argument("--port", type=int, default=None, help="Bind port (default: 8765)")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    if args.command == "mcp-server":
+        from cosmos_q.mcp_server import run_server
+
+        mcp_config = CosmosConfig()
+        if args.host:
+            mcp_config = mcp_config.model_copy(update={"mcp_host": args.host})
+        if args.port:
+            mcp_config = mcp_config.model_copy(update={"mcp_port": args.port})
+        print(f"Starting COSMOS-Q MCP server on {mcp_config.mcp_host}:{mcp_config.mcp_port}")
+        run_server(mcp_config)
+        return
 
     if args.command == "evaluate":
         harness = EvaluationHarness()

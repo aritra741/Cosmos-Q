@@ -1,0 +1,62 @@
+version: "3.9"
+
+# Local development stack matching the Alibaba Cloud production topology:
+#   - PostgreSQL + pgvector  (mirrors ApsaraDB RDS)
+#   - COSMOS-Q MCP server
+#   - COSMOS-Q CLI (one-shot mode via `docker compose run cli`)
+
+services:
+  # ------------------------------------------------------------------ #
+  # ApsaraDB RDS mirror: PostgreSQL 15 + pgvector
+  # ------------------------------------------------------------------ #
+  postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_DB: cosmos_q
+      POSTGRES_USER: cosmos
+      POSTGRES_PASSWORD: cosmos_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cosmos -d cosmos_q"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ------------------------------------------------------------------ #
+  # COSMOS-Q MCP server
+  # ------------------------------------------------------------------ #
+  mcp-server:
+    build: .
+    environment:
+      COSMOS_PG_DSN: "postgresql://cosmos:cosmos_dev@postgres:5432/cosmos_q"
+      COSMOS_QWEN_API_KEY: "${COSMOS_QWEN_API_KEY:-}"
+      COSMOS_QWEN_MODEL: "${COSMOS_QWEN_MODEL:-qwen-plus}"
+      COSMOS_ENABLE_SESSION_CACHE: "true"
+      COSMOS_ENABLE_THINKING: "false"
+    ports:
+      - "8765:8765"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ #
+  # One-shot CLI (run: docker compose run cli cosmos-q evaluate)
+  # ------------------------------------------------------------------ #
+  cli:
+    build: .
+    environment:
+      COSMOS_PG_DSN: "postgresql://cosmos:cosmos_dev@postgres:5432/cosmos_q"
+      COSMOS_QWEN_API_KEY: "${COSMOS_QWEN_API_KEY:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["cosmos-q"]
+    command: ["evaluate"]
+    profiles: ["cli"]
+
+volumes:
+  pgdata:

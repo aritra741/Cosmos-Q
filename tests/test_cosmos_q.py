@@ -56,7 +56,7 @@ class TestEmbeddings:
 
         emb = EmbeddingService()
         vec = emb.embed("hello world")
-        assert len(vec) == emb.config.embedding_dim
+        assert len(vec) == emb.active_dim
         assert abs(np.linalg.norm(vec) - 1.0) < 0.01
 
     def test_identical_texts_have_similarity_one(self):

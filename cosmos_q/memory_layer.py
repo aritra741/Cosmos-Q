@@ -1,4 +1,13 @@
-"""Main COSMOS-Q memory layer orchestrating all six sub-modules."""
+"""Main COSMOS-Q memory layer orchestrating all six sub-modules.
+
+Integrates:
+  - ApsaraDB RDS + pgvector or SQLite (selected by config.pg_dsn).
+  - Qwen Responses API with previous_response_id (intra-session multi-turn).
+  - Session cache (x-dashscope-session-cache header).
+  - Thinking mode for high-stakes operations (RTR reconsolidation decisions).
+  - Parallel tool calls for concurrent memory operations.
+  - text-embedding-v3 (1024-dim) for R(m,q), Sim(), and schema clustering.
+"""
 
 from __future__ import annotations
 
@@ -16,27 +25,68 @@ from cosmos_q.mechanisms.iaaf import ForgettingEngine
 from cosmos_q.mechanisms.rtr import ReconsolidationEngine
 from cosmos_q.mechanisms.uacp import ContextPacker
 from cosmos_q.models import AgentState, MemoryBrief, MemoryNode, TraceRecord
-from cosmos_q.store.memory_store import MemoryStore
+from cosmos_q.store import make_store
+
+
+# Tool definitions exposed to Qwen for parallel function calling.
+# The model can call these concurrently in a single response.
+_COSMOS_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_retrieve",
+            "description": "Retrieve relevant memories for a query using COSMOS-Q UACP.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The user query to retrieve memories for."},
+                    "top_k": {"type": "integer", "default": 20},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schema_query",
+            "description": "Query high-level schemas (preferences, goals, facts) for a user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "schema_type": {
+                        "type": "string",
+                        "enum": ["PREFERENCE", "GOAL", "FACT", "PROCEDURE", "BEHAVIOR", "ALL"],
+                        "default": "ALL",
+                    }
+                },
+            },
+        },
+    },
+]
 
 
 class CosmosMemoryLayer:
     """
-    COSMOS-Q Memory Layer — the central orchestrator.
+    COSMOS-Q Memory Layer.
 
     Retrieve flow:
-        query → similarity search → UACP → Memory Brief
+        query → similarity search (text-embedding-v3 / pgvector ANN)
+              → UACP → Memory Brief
 
     Chat flow:
-        query → retrieve (UACP) → Qwen → RTR on retrieved memories (post-response)
-             → Trace Logger → Episodic Buffer (write new memory)
+        query → retrieve → Qwen Responses API (previous_response_id chain)
+              → RTR post-response (thinking mode for high divergence)
+              → Trace Logger → Episodic Buffer
 
-    Between sessions (explicit):
-        run_maintenance() → IAAF forgetting → ASC consolidation
+    Between sessions:
+        run_maintenance() → IAAF → ASC
+        (or triggered via Alibaba Cloud Function Compute)
     """
 
     def __init__(self, config: CosmosConfig | None = None):
         self.config = config or CosmosConfig()
-        self.store = MemoryStore(self.config)
+        self.store = make_store(self.config)
         self.embedder = EmbeddingService(self.config)
         self.rtr = ReconsolidationEngine(self.store, self.embedder, self.config)
         self.packer = ContextPacker(self.store, self.config)
@@ -60,8 +110,8 @@ class CosmosMemoryLayer:
         """
         Retrieve and pack memories for a query.
 
-        RTR is intentionally *not* applied here — it requires the agent
-        response to be meaningful.  Call chat() for the full RTR-enabled path.
+        Uses text-embedding-v3 for R(m,q) (relevance) and pgvector ANN when
+        available.  RTR is not applied here — it requires the agent response.
         """
         state = agent_state or AgentState()
         query_emb = self.embedder.embed(query)
@@ -82,17 +132,40 @@ class CosmosMemoryLayer:
         query: str,
         session_id: str = "default",
         turn_index: int = 0,
+        use_tools: bool = False,
     ) -> dict:
         """
-        End-to-end: retrieve memories → call Qwen → RTR (post-response) →
-        log trace → write episodic memory.
+        End-to-end chat using the Responses API.
+
+        - `previous_response_id` chains intra-session context natively.
+        - Session cache reduces token cost 10× on repeated context.
+        - `use_tools=True` enables parallel function calling for concurrent
+          memory_retrieve + schema_query in a single model call.
+        - Thinking mode enabled post-response for RTR reconsolidation
+          decisions when semantic divergence is non-trivial.
         """
         brief = self.retrieve(user_id, query)
         system_prompt = build_system_prompt(brief.text)
-        response = self.qwen.chat(system_prompt, query)
 
+        response_text: str
+        if use_tools and self.qwen.is_available():
+            raw = self.qwen.chat_with_tools(
+                system_prompt, query,
+                tool_definitions=_COSMOS_TOOLS,
+                session_id=session_id,
+                use_thinking=False,
+            )
+            response_text = self.qwen._extract_text(raw)
+        else:
+            response_text = self.qwen.chat(
+                system_prompt, query,
+                session_id=session_id,
+                use_thinking=False,
+            )
+
+        # RTR: use thinking mode for high-stakes reconsolidation decisions
         self._post_response_rtr(
-            user_id, brief, query, response, session_id, turn_index
+            user_id, brief, query, response_text, session_id, turn_index
         )
 
         trace = TraceRecord(
@@ -100,17 +173,18 @@ class CosmosMemoryLayer:
             session_id=session_id,
             turn_index=turn_index,
             query=query,
-            response=response,
+            response=response_text,
             retrieved_memory_ids=[m.id for m in brief.memories],
         )
         self.tracer.log(trace)
         self.pipeline.process_trace(trace)
 
         return {
-            "response": response,
+            "response": response_text,
             "memory_brief": brief.text,
             "retrieved_count": len(brief.memories),
             "total_tokens": brief.total_tokens,
+            "session_id": session_id,
         }
 
     def chat_mock(
@@ -123,11 +197,9 @@ class CosmosMemoryLayer:
     ) -> dict:
         """Same as chat() with a mock response (for evaluation without API key)."""
         brief = self.retrieve(user_id, query)
-
         self._post_response_rtr(
             user_id, brief, query, mock_response, session_id, turn_index
         )
-
         trace = TraceRecord(
             user_id=user_id,
             session_id=session_id,
@@ -138,12 +210,12 @@ class CosmosMemoryLayer:
         )
         self.tracer.log(trace)
         self.pipeline.process_trace(trace)
-
         return {
             "response": mock_response,
             "memory_brief": brief.text,
             "retrieved_count": len(brief.memories),
             "total_tokens": brief.total_tokens,
+            "session_id": session_id,
         }
 
     def _post_response_rtr(
@@ -156,9 +228,11 @@ class CosmosMemoryLayer:
         turn_index: int,
     ) -> None:
         """
-        Apply RTR only to memories that were actually packed into the brief,
-        using the agent response as context.  This matches the paper: RTR fires
-        when a retrieved memory's implication diverges from the new evidence.
+        Apply RTR to packed memories using the full query+response as context.
+
+        Thinking mode is used here when config.enable_thinking is True:
+        it produces an auditable reasoning chain for reconsolidation decisions
+        (should this memory be revised?), improving the quality of versioning.
         """
         context_text = f"Q: {query}\nA: {response}"
         for mem in brief.memories:
@@ -167,6 +241,17 @@ class CosmosMemoryLayer:
                 self.rtr.process_retrieved(
                     fresh, query, context_text, session_id, turn_index
                 )
+
+    def end_session(self, user_id: UUID, session_id: str) -> None:
+        """
+        Close an intra-session Responses API chain and trigger maintenance.
+
+        Call this at the end of a user session so:
+          1. The previous_response_id chain is discarded.
+          2. IAAF + ASC maintenance runs (or is delegated to Function Compute).
+        """
+        self.qwen.end_session(session_id)
+        self.run_maintenance(user_id)
 
     def add_memory(self, user_id: UUID, content: str, **kwargs) -> MemoryNode:
         """Explicitly store a memory. Returns the created MemoryNode."""
