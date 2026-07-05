@@ -31,6 +31,7 @@ from uuid import UUID, uuid4
 
 try:
     from fastapi import FastAPI, Request
+    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import StreamingResponse
     import uvicorn
     _FASTAPI_AVAILABLE = True
@@ -40,6 +41,7 @@ except ImportError:
 from cosmos_q.config import CosmosConfig
 from cosmos_q.memory_layer import CosmosMemoryLayer
 from cosmos_q.models import SchemaType
+from cosmos_q.web_api import create_web_router
 
 logger = logging.getLogger(__name__)
 
@@ -266,8 +268,20 @@ def create_app(config: CosmosConfig | None = None) -> "FastAPI":
             "Install with: pip install fastapi uvicorn sse-starlette"
         )
 
-    app = FastAPI(title="COSMOS-Q MCP Server", version="0.1.0")
-    layer = CosmosMemoryLayer(config)
+    cfg = config or CosmosConfig()
+    app = FastAPI(title="COSMOS-Q Server", version="0.1.0")
+    layer = CosmosMemoryLayer(cfg)
+
+    cors_origins = cfg.cors_origins.split(",") if cfg.cors_origins else ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in cors_origins if o.strip()],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(create_web_router(layer))
 
     @app.get("/health")
     def health():
