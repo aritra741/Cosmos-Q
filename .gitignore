@@ -9,3 +9,12 @@ __pycache__/
 dist/
 build/
 .DS_Store
+
+# Terraform
+*.tfstate*
+*.tfvars
+.terraform/
+
+# Serverless Devs
+.s/
+

@@ -136,6 +136,17 @@ class MemoryStore:
                 ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
+    def list_user_ids(self) -> list[UUID]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT user_id FROM memories WHERE status = 'ACTIVE'"
+            ).fetchall()
+        return [UUID(row["user_id"]) for row in rows]
+
+    def close(self) -> None:
+        pass
+
+
     def search_memories(
         self,
         user_id: UUID,

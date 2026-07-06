@@ -1,0 +1,29 @@
+edition: 3.0.0
+name: cosmos-q-maintenance
+access: default
+
+resources:
+  asc_handler:
+    component: fc3
+    props:
+      region: ap-southeast-1
+      functionName: cosmos-q-asc
+      runtime: python3.10
+      code: ./cosmos_q/function_compute
+      handler: asc_handler.handler
+      memorySize: 512
+      timeout: 300
+      vpcConfig:
+        vpcId: ${env(COSMOS_VPC_ID)}
+        vswitchIds:
+          - ${env(COSMOS_VSWITCH_ID)}
+        securityGroupId: ${env(COSMOS_SECURITY_GROUP_ID)}
+      environmentVariables:
+        COSMOS_PG_DSN: ${env(COSMOS_PG_DSN)}
+        COSMOS_QWEN_API_KEY: ${env(COSMOS_QWEN_API_KEY)}
+      triggers:
+        - triggerName: daily-maintenance
+          triggerType: timer
+          triggerConfig:
+            cronExpression: "0 0 3 * * *"
+            enable: true

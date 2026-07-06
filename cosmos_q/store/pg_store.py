@@ -206,6 +206,21 @@ class PgMemoryStore:
             rows = cur.fetchall()
         return [self._row_to_memory(dict(r)) for r in rows]
 
+    def list_user_ids(self) -> list[UUID]:
+        conn = self._connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT user_id FROM memories WHERE status = 'ACTIVE'"
+            )
+            rows = cur.fetchall()
+        return [UUID(str(row["user_id"])) for row in rows]
+
+    def close(self) -> None:
+        if self._conn is not None and not self._conn.closed:
+            self._conn.close()
+            self._conn = None
+
+
     def search_memories(
         self,
         user_id: UUID,

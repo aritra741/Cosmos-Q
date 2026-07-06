@@ -557,7 +557,8 @@ docker compose up          # starts postgres+pgvector + MCP server
                         │  Alibaba Cloud ECS   │
                         │                      │
 User ──► Application ──►│  COSMOS-Q MCP Server │──► Qwen Cloud API
-                        │  (Docker, ACR image) │    (Chat + Embeddings)
+                        │ (Docker, build from  │    (Chat + Embeddings)
+                        │        source)       │
                         └──────────┬───────────┘
                                    │
                         ┌──────────▼───────────┐
@@ -574,20 +575,20 @@ User ──► Application ──►│  COSMOS-Q MCP Server │──► Qwen C
                         └──────────────────────┘
 ```
 
-### Container Registry (ACR)
+### Image Build Strategy
 
-```bash
-export ACR_NAMESPACE=your-namespace
-bash scripts/acr_push.sh latest
-# → pushes to registry.cn-hangzhou.aliyuncs.com/<namespace>/cosmos-q:latest
-```
+To minimize deployment cost and avoid managed Container Registry (ACR) credit overhead, the ECS instance builds the Docker container directly from source at boot:
+1. Docker, git, and a PostgreSQL client are installed.
+2. The repository is cloned from the public git URL.
+3. A local container image is built: `docker build -t cosmos-q:latest .`
+4. The container runs locally, mapping port 8765.
 
 ### Function Compute (ASC)
 
 Triggered on session-end events; daily scheduled at 03:00 UTC.
 
 ```bash
-fun deploy -t function_compute_template.yml
+s deploy -y
 ```
 
 Event payload:
@@ -635,6 +636,16 @@ cosmos_q/
     ├── metrics.py             EvalResult, check_answer, check_retrieval_contains
     ├── baselines.py           No Memory, Full Transcript, Rolling Summary, Naive RAG
     └── harness.py             EvaluationHarness — runs full C-MEM benchmark
+
+infra/
+├── provider.tf                Terraform provider (aliyun/alicloud)
+├── variables.tf               Variables declarations
+├── network.tf                 VPC, VSwitch, Security Group
+├── rds.tf                     ApsaraDB RDS PostgreSQL 15 Instance + Account
+├── ecs.tf                     Elastic Compute Service for MCP
+├── outputs.tf                 Plumbing variables (vpc_id, vswitch_id, sg_id)
+└── scripts/
+    └── ecs_bootstrap.sh.tpl   Cloud-init ECS bootstrap configuration
 ```
 
 ---
