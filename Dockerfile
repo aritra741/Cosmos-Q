@@ -14,7 +14,7 @@ COPY cosmos_q/ cosmos_q/
 COPY tests/ tests/
 
 RUN pip install --upgrade pip \
- && pip install --no-cache-dir -e ".[all,dev]"
+ && pip install --no-cache-dir -e ".[pg,mcp]"
 
 # --------------------------------------------------------------------- #
 # Stage 2: runtime image
