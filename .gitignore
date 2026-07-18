@@ -22,3 +22,5 @@ build/
 paper/
 experiments/interaction_probe/
 
+.gemini/
+
