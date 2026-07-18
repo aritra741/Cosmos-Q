@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from cosmos_q.config import CosmosConfig
 from cosmos_q.embeddings import EmbeddingService, cosine_similarity, estimate_contradiction
-from cosmos_q.models import MemoryNode, MemoryStatus, Schema, SchemaType
+from cosmos_q.models import MemoryNode, Schema, SchemaType
 from cosmos_q.store.memory_store import MemoryStore
 
 
@@ -18,7 +19,8 @@ class ConsolidationEngine:
     - Replay batch = recent ∪ stable ∪ unstable ∪ mid-stability (all ACTIVE).
     - For each cluster find nearest schema; refine on consistency, reduce
       confidence on contradiction, split when confidence < τ_split.
-    - Both create and update paths mark memories CONSOLIDATED consistently.
+    - assembly-defect fix, probe re-run: schemas are additive — source
+      episodics stay ACTIVE/retrievable (linked via schema_id).
     """
 
     def __init__(
@@ -26,10 +28,16 @@ class ConsolidationEngine:
         store: MemoryStore,
         embedder: EmbeddingService,
         config: CosmosConfig | None = None,
+        qwen_client: Any = None,
     ):
         self.store = store
         self.embedder = embedder
         self.config = config or CosmosConfig()
+        if qwen_client is not None:
+            self.qwen = qwen_client
+        else:
+            from cosmos_q.agent.qwen_client import QwenClient
+            self.qwen = QwenClient(self.config)
 
     def run_consolidation(self, user_id: UUID) -> list[Schema]:
         if not self.config.enable_asc:
@@ -128,10 +136,10 @@ class ConsolidationEngine:
         schema.embedding = cluster_embedding
         saved = self.store.save_schema(schema)
 
-        # Mark consolidated memories consistently (same as _create_schema)
+        # assembly-defect fix, probe re-run: ASC is additive — link schema_id
+        # but keep episodics ACTIVE/retrievable (do not mark CONSOLIDATED).
         for mem in cluster:
             mem.schema_id = saved.id
-            mem.status = MemoryStatus.CONSOLIDATED
             self.store.save_memory(mem)
 
         return saved
@@ -152,9 +160,9 @@ class ConsolidationEngine:
             embedding=embedding,
         )
         saved = self.store.save_schema(schema)
+        # assembly-defect fix, probe re-run: retain source episodics as ACTIVE.
         for mem in cluster:
             mem.schema_id = saved.id
-            mem.status = MemoryStatus.CONSOLIDATED
             self.store.save_memory(mem)
         return saved
 
@@ -196,11 +204,49 @@ class ConsolidationEngine:
         return SchemaType.FACT
 
     def _summarize_cluster(self, cluster: list[MemoryNode]) -> str:
-        """Summarise all cluster members, not just the first."""
-        snippets = "; ".join(m.content[:80] for m in cluster[:5])
-        suffix = f" (+{len(cluster) - 5} more)" if len(cluster) > 5 else ""
-        return f"Pattern ({len(cluster)} memories): {snippets}{suffix}"
+        """Summarise all cluster members using Qwen completions."""
+        if not cluster:
+            return ""
+        if not self.qwen.is_available():
+            # Fallback
+            snippets = "; ".join(m.content[:80] for m in cluster[:5])
+            suffix = f" (+{len(cluster) - 5} more)" if len(cluster) > 5 else ""
+            return f"Pattern ({len(cluster)} memories): {snippets}{suffix}"
+
+        system_prompt = (
+            "You are COSMOS-Q's Schema Consolidation Engine. Your job is to analyze a cluster of related "
+            "episodic memories and synthesize them into a single, high-level schema abstraction. The schema "
+            "must be a concise, direct, third-person summary of the user's preference, goal, habit, or "
+            "factual pattern (e.g., 'The user prefers coding in Python, particularly for web backends'). "
+            "Do not include conversational filler, introductory remarks, or meta-commentary. "
+            "Output only the synthesized schema text. Keep it under 30 words."
+        )
+        user_message = "Episodic Memories to consolidate:\n" + "\n".join(f"- {m.content}" for m in cluster)
+        try:
+            return self.qwen.chat_internal(system_prompt, user_message, use_thinking=True).strip()
+        except Exception as exc:
+            # Safe fallback on API error
+            snippets = "; ".join(m.content[:80] for m in cluster[:5])
+            return f"Pattern ({len(cluster)} memories): {snippets}"
 
     def _refine_content(self, existing: str, cluster: list[MemoryNode]) -> str:
-        latest = "; ".join(m.content[:60] for m in cluster[-3:])
-        return f"{existing} | updated: {latest}"
+        """Refine existing schema summary with new cluster memories using Qwen completions."""
+        if not self.qwen.is_available():
+            latest = "; ".join(m.content[:60] for m in cluster[-3:])
+            return f"{existing} | updated: {latest}"
+
+        system_prompt = (
+            "You are COSMOS-Q's Schema Consolidation Engine. Your job is to refine an existing schema summary "
+            "based on a set of new supporting episodic memories. Synthesize the existing schema and the new "
+            "memories into an updated, single high-level schema. Do not include conversational filler, "
+            "introductory remarks, or meta-commentary. Output only the updated schema text. Keep it under 30 words."
+        )
+        user_message = (
+            f"Existing Schema:\n{existing}\n\n"
+            "New Supporting Memories:\n" + "\n".join(f"- {m.content}" for m in cluster)
+        )
+        try:
+            return self.qwen.chat_internal(system_prompt, user_message, use_thinking=True).strip()
+        except Exception:
+            latest = "; ".join(m.content[:60] for m in cluster[-3:])
+            return f"{existing} | updated: {latest}"

@@ -1,3 +1,7 @@
+resource "alicloud_rds_service_linked_role" "default" {
+  service_name = "AliyunServiceRoleForRdsPgsqlOnEcs"
+}
+
 resource "alicloud_db_instance" "cosmos" {
   engine           = "PostgreSQL"
   engine_version   = "15.0"
@@ -6,12 +10,10 @@ resource "alicloud_db_instance" "cosmos" {
   vswitch_id       = alicloud_vswitch.cosmos.id
   security_ips     = ["10.0.1.0/24"]   # allow the VSwitch subnet (ECS and Function Compute)
   instance_name    = "cosmos-q-pg"
+  depends_on       = [alicloud_rds_service_linked_role.default]
 }
 
-resource "alicloud_db_database" "cosmos" {
-  instance_id = alicloud_db_instance.cosmos.id
-  name        = "cosmos_q"
-}
+
 
 resource "alicloud_rds_account" "cosmos" {
   db_instance_id   = alicloud_db_instance.cosmos.id
@@ -20,8 +22,7 @@ resource "alicloud_rds_account" "cosmos" {
   account_type     = "Super"          # Super account can CREATE EXTENSION
 }
 
+
+
 # Private connection endpoint for ECS-to-RDS traffic
-resource "alicloud_db_connection" "cosmos" {
-  instance_id       = alicloud_db_instance.cosmos.id
-  connection_prefix = "cosmosq"
-}
+

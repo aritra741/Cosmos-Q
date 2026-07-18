@@ -18,3 +18,7 @@ build/
 # Serverless Devs
 .s/
 
+# Paper / probe artifacts (not tracked)
+paper/
+experiments/interaction_probe/
+

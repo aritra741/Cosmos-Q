@@ -7,7 +7,7 @@ output "mcp_url" {
 }
 
 output "rds_endpoint" {
-  value = alicloud_db_connection.cosmos.connection_string
+  value = alicloud_db_instance.cosmos.connection_string
 }
 
 output "vpc_id" {
@@ -20,4 +20,8 @@ output "vswitch_id" {
 
 output "security_group_id" {
   value = alicloud_security_group.cosmos.id
+}
+
+output "fc_role_arn" {
+  value = alicloud_ram_role.fc_role.arn
 }

@@ -392,12 +392,16 @@ class TestASC:
     def test_consolidated_memories_status(self, layer, user_id):
         layer.add_memory(user_id, "User prefers dark mode")
         layer.add_memory(user_id, "User likes dark theme interfaces")
+        before = layer.get_active_memory_count(user_id)
         layer.consolidation.run_consolidation(user_id)
-        # After consolidation memories should be CONSOLIDATED or still ACTIVE
-        # (ASC marks them CONSOLIDATED)
-        all_mems = layer.store.list_memories(user_id, status=None)
-        statuses = {m.status for m in all_mems}
-        assert MemoryStatus.CONSOLIDATED in statuses or MemoryStatus.ACTIVE in statuses
+        # assembly-defect fix: episodics remain ACTIVE and retrievable
+        after = layer.get_active_memory_count(user_id)
+        assert after == before
+        schemas = layer.store.list_schemas(user_id)
+        assert schemas
+        for m in layer.store.list_memories(user_id):
+            assert m.status == MemoryStatus.ACTIVE
+            assert m.schema_id is not None
 
     def test_supporting_memories_no_duplicates(self, layer, user_id):
         layer.add_memory(user_id, "User prefers dark mode")

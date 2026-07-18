@@ -35,6 +35,14 @@ variable "instance_type" {
 
 variable "db_instance_class" {
   type    = string
-  default = "pg.n2.small.1"
+  default = "pg.n2.2c.1m"
 }
+
+variable "ecs_password" {
+  type      = string
+  sensitive = true
+  default   = "CosmosQPass123!"
+}
+
+
 

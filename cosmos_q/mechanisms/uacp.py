@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
+from uuid import UUID
 
 from cosmos_q.config import CosmosConfig
 from cosmos_q.embeddings import cosine_similarity
-from cosmos_q.models import AgentState, MemoryBrief, MemoryNode, Schema
+from cosmos_q.models import AgentState, MemoryBrief, MemoryNode, MemoryStatus, Schema
 from cosmos_q.store.memory_store import MemoryStore
 
 
@@ -149,6 +150,11 @@ class ContextPacker:
     def _compose_brief(
         self, memories: list[MemoryNode], schemas: list[Schema]
     ) -> str:
+        # assembly-defect fix, probe re-run: when RTR is on, strip any
+        # SUPERSEDED/ARCHIVED version content spans from the assembled string.
+        if self.config.enable_rtr and memories:
+            memories = self._drop_superseded_spans(memories)
+
         parts: list[str] = []
         if schemas:
             parts.append("## Known Patterns")
@@ -161,3 +167,38 @@ class ContextPacker:
             for m in memories:
                 parts.append(f"- {m.content}")
         return "\n".join(parts)
+
+    def _drop_superseded_spans(self, memories: list[MemoryNode]) -> list[MemoryNode]:
+        """
+        Smallest reliable rule: collect SUPERSEDED + ARCHIVED contents for the
+        user; remove those exact spans from ACTIVE packed contents; drop a
+        memory if nothing remains. Baseline (enable_rtr=False) never calls this.
+        """
+        if not memories:
+            return memories
+        user_id: UUID = memories[0].user_id
+        blocked: list[str] = []
+        for status in (MemoryStatus.SUPERSEDED, MemoryStatus.ARCHIVED):
+            for m in self.store.list_memories(user_id, status=status):
+                text = (m.content or "").strip()
+                if text:
+                    blocked.append(text)
+        if not blocked:
+            return memories
+
+        # Longer spans first so nested replacements are stable.
+        blocked.sort(key=len, reverse=True)
+        cleaned: list[MemoryNode] = []
+        for mem in memories:
+            content = mem.content or ""
+            for span in blocked:
+                if span and span in content:
+                    content = content.replace(span, "")
+            content = " ".join(content.split()).strip()
+            if not content:
+                continue
+            if content != mem.content:
+                cleaned.append(mem.model_copy(update={"content": content}))
+            else:
+                cleaned.append(mem)
+        return cleaned

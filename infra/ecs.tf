@@ -12,12 +12,14 @@ resource "alicloud_instance" "mcp_server" {
   vswitch_id                 = alicloud_vswitch.cosmos.id
   internet_max_bandwidth_out = 10   # gives it a public IP
 
+  password                   = var.ecs_password
+
   user_data = base64encode(templatefile("${path.module}/scripts/ecs_bootstrap.sh.tpl", {
     git_repo_url = var.git_repo_url
     qwen_api_key = var.qwen_api_key
-    pg_host      = alicloud_db_connection.cosmos.connection_string
-    pg_dsn       = "postgresql://cosmos:${var.db_password}@${alicloud_db_connection.cosmos.connection_string}:5432/cosmos_q"
+    pg_host      = alicloud_db_instance.cosmos.connection_string
+    pg_dsn       = "postgresql://cosmos:${var.db_password}@${alicloud_db_instance.cosmos.connection_string}:5432/cosmos_q"
   }))
 
-  depends_on = [alicloud_db_connection.cosmos]
+  depends_on = [alicloud_db_instance.cosmos]
 }

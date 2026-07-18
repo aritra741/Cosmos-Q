@@ -91,7 +91,10 @@ class ReconsolidationEngine:
         return self.store.save_memory(new_memory)
 
     def _merge(self, old_content: str, context: str, query: str) -> str:
-        return (
-            f"[Updated] {old_content} "
-            f"(revised in context of '{query[:60]}': {context[:200]})"
-        )
+        # assembly-defect fix, probe re-run: do not embed superseded (old)
+        # content into the ACTIVE successor — that leaked stale spans into
+        # the assembled LLM context even though only ACTIVE rows were retrieved.
+        ctx = (context or "").strip()
+        if ctx:
+            return ctx[:500]
+        return f"[Updated regarding '{query[:60]}']"

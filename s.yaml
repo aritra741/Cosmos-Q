@@ -8,14 +8,15 @@ resources:
     props:
       region: ap-southeast-1
       functionName: cosmos-q-asc
+      role: ${env(COSMOS_FC_ROLE_ARN)}
       runtime: python3.10
-      code: ./cosmos_q/function_compute
+      code: ./deploy_fc
       handler: asc_handler.handler
       memorySize: 512
       timeout: 300
       vpcConfig:
         vpcId: ${env(COSMOS_VPC_ID)}
-        vswitchIds:
+        vSwitchIds:
           - ${env(COSMOS_VSWITCH_ID)}
         securityGroupId: ${env(COSMOS_SECURITY_GROUP_ID)}
       environmentVariables:
@@ -26,4 +27,4 @@ resources:
           triggerType: timer
           triggerConfig:
             cronExpression: "0 0 3 * * *"
-            enable: true
+            enable: false
