@@ -1,101 +1,141 @@
 # COSMOS-Q
 
-Cognitive memory architecture for Qwen-powered longitudinal agents. Memory is managed as an adaptive lifecycle — reconsolidation, consolidation, interference-aware forgetting, and utility-aware retrieval — rather than flat similarity-based storage.
+COSMOS-Q is a local memory system for persistent user state.
 
-## Features
+It stores user memories, retrieves relevant context for new requests, groups related memories into schemas, and maintains the memory graph over time. The repository includes a Python API server, MCP-style tool endpoints, and a React interface for inspecting and exercising the system locally.
 
-- **RTR** — Versioned Retrieval-Triggered Reconsolidation
-- **ASC** — Asynchronous Schema Consolidation
-- **IAAF** — Interference-Aware Adaptive Forgetting
-- **UACP** — Utility-Aware Context Packing
-- **C-MEM** — Controlled benchmark with baselines and ablations
+## Core Capabilities
 
-## Requirements
+COSMOS-Q provides:
 
-- Python 3.10+
-- Optional: `sentence-transformers` for production-quality embeddings
-- Qwen API key (DashScope) for live chat
+- Persistent memory storage for a user across sessions
+- Retrieval of relevant memories for a new query
+- Schema creation and updates from related memories
+- Session-end maintenance for memory cleanup and consolidation
+- Local REST and SSE interfaces for integrating the memory layer into other systems
 
-## Install
+If `COSMOS_QWEN_API_KEY` is set, the system uses Qwen for live response generation and some internal operations. If it is not set, the local app still runs and uses mock chat responses where needed.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-# Optional: pip install sentence-transformers
+## Project Structure
+
+```text
+cosmos_q/     Python backend, API routes, memory logic, and server entrypoints
+frontend/     React + Vite interface for local inspection and interaction
+tests/        Test suite
 ```
 
-## Configuration
+## Prerequisites
 
-Copy `.env.example` to `.env` and set your API key:
+- Python 3.10 or newer
+- Node.js 18 or newer
+- npm
+
+## Environment Setup
+
+Copy the example environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Description |
-|----------|-------------|
-| `COSMOS_QWEN_API_KEY` | Qwen / DashScope API key |
-| `COSMOS_QWEN_MODEL` | Model name (default: `qwen-plus`) |
-| `COSMOS_DB_PATH` | SQLite database path |
+The most important variables are:
 
-## CLI
+- `COSMOS_QWEN_API_KEY`: Optional. Enables live Qwen-backed responses.
+- `COSMOS_QWEN_MODEL`: Optional. Overrides the default Qwen model.
+- `COSMOS_DB_PATH`: Optional. Overrides the local SQLite database path.
+
+## Install
+
+### Backend
+
+Create a virtual environment and install the backend with server dependencies:
 
 ```bash
-# Store a memory (user ID persisted in ~/.cosmos_q_user_id)
-cosmos-q add-memory "I prefer dark mode"
-
-# Retrieve memory brief for a query
-cosmos-q retrieve "What theme do I like?"
-
-# Chat with Qwen (requires API key)
-cosmos-q chat "What do you know about me?"
-
-# Run IAAF + ASC maintenance between sessions
-cosmos-q maintain
-
-# Run C-MEM evaluation across all baselines and ablations
-cosmos-q evaluate
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev,mcp]"
 ```
 
-## Python API
+### Frontend
 
-```python
-from uuid import uuid4
-from cosmos_q import CosmosConfig, CosmosMemoryLayer
+Install the frontend dependencies:
 
-config = CosmosConfig(db_path="my_agent.db")
-layer = CosmosMemoryLayer(config)
-user_id = uuid4()
-
-layer.add_memory(user_id, "User prefers Python for scripting")
-brief = layer.retrieve(user_id, "What language do I use?")
-print(brief.text)
-
-layer.run_maintenance(user_id)
+```bash
+cd frontend
+npm install
+cd ..
 ```
+
+## Run Locally
+
+Start the backend in one terminal:
+
+```bash
+source .venv/bin/activate
+cosmos-q-mcp
+```
+
+The backend listens on `http://127.0.0.1:8787` by default.
+
+Start the frontend in a second terminal:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Vite will print the local URL, usually `http://127.0.0.1:5173` or `http://localhost:5173`.
+
+Open that URL in your browser to inspect memory state and exercise the local system.
+
+## API Endpoints
+
+The backend includes these main routes:
+
+- `GET /health`: Health check
+- `GET /api/user`: Get or create a user ID
+- `GET /api/state`: Read memory graph and state for a user
+- `POST /api/chat`: Run a turn through the memory-backed flow
+- `POST /api/session/end`: End a session and run maintenance
+- `GET /tools`: List available MCP-style tools
+- `GET /sse`: SSE endpoint for tool discovery
+- `POST /invoke`: Invoke a tool by name
+
+## Tool Endpoints
+
+The MCP-style tool layer exposes operations such as:
+
+- `memory_store`
+- `memory_retrieve`
+- `memory_reconsolidate`
+- `memory_forget`
+- `schema_query`
+
+Example health check:
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+## Frontend Configuration
+
+The frontend proxies:
+
+- `/api` to `http://localhost:8787`
+- `/health` to `http://localhost:8787`
+
+If you need a different backend URL, set `VITE_API_URL`.
+
+## Development Notes
+
+- The default database file is `cosmos_q.db` in the repo root.
+- The backend allows local frontend origins on common Vite ports.
+- A persistent user ID may be stored in `~/.cosmos_q_demo_user_id`.
 
 ## Tests
+
+Run the backend test suite with:
 
 ```bash
 pytest tests/ -v
 ```
-
-## Project layout
-
-```
-cosmos_q/
-  config.py           # Tunable parameters and ablation presets
-  models.py           # MemoryNode, Schema, TraceRecord
-  embeddings.py       # Embedding pipeline
-  memory_layer.py     # Main orchestrator
-  mechanisms/         # RTR, UACP, IAAF, ASC, episodic buffer
-  agent/              # Qwen client, prompts, trace logger, pipeline
-  store/              # SQLite + vector search
-  evaluation/         # C-MEM benchmark, baselines, metrics
-tests/
-```
-
-## Reference
-
-See `qwen_memory.pdf` for the full COSMOS-Q design specification.

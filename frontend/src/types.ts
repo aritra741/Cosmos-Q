@@ -1,5 +1,13 @@
 export type MemoryStatus = 'ACTIVE' | 'SUPERSEDED' | 'CONSOLIDATED' | 'ARCHIVED';
 
+export interface LineageEntry {
+  id: string;
+  status: Extract<MemoryStatus, 'ACTIVE' | 'SUPERSEDED'>;
+  contentSnippet: string;
+  timestamp: string;
+  trigger: string;
+}
+
 export interface MemoryNode {
   id: string;
   label: string;
@@ -10,6 +18,7 @@ export interface MemoryNode {
   parentId?: string;
   isInterfering?: boolean;
   isNew?: boolean;
+  lineage?: LineageEntry[];
 }
 
 export interface ActiveMemory {
@@ -70,6 +79,18 @@ export interface Turn {
    */
   consolidationNodeIds?: string[];
   consolidationLabel?: string;
+  /**
+   * Per-turn authored timing overrides. AppDemo falls back to the legacy
+   * derived timings when these are omitted.
+   */
+  preSnapshotDelay?: number;
+  overlayDuration?: number;
+  replyDelay?: number;
+  dwellAfter?: number;
+  /**
+   * Auto-open the lineage drawer after the resolved frame lands.
+   */
+  lineageFocusNodeId?: string;
   /** Full memory state after this turn resolves. */
   nodes: MemoryNode[];
   activeMemories: ActiveMemory[];
@@ -79,6 +100,6 @@ export interface Turn {
 
 /** Transient overlay event the MemoryGraph renders on top of the nodes. */
 export type GraphEvent =
-{kind: 'evict';nodeIds: string[];} |
-{kind: 'consolidate';nodeIds: string[];label: string;} |
-null;
+  | { kind: 'evict'; nodeIds: string[] }
+  | { kind: 'consolidate'; nodeIds: string[]; label: string }
+  | null;

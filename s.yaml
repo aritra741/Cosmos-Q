@@ -27,4 +27,4 @@ resources:
           triggerType: timer
           triggerConfig:
             cronExpression: "0 0 3 * * *"
-            enable: false
+            enable: true

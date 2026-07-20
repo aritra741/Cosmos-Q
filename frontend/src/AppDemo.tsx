@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ChatPanel } from './components/ChatPanel';
 import { MemoryTheater } from './components/MemoryTheater';
 import {
@@ -23,20 +23,27 @@ export function AppDemo() {
   const [budgetUsed, setBudgetUsed] = useState(INITIAL_BUDGET);
   const [sessionLabel, setSessionLabel] = useState(INITIAL_SESSION_LABEL);
   const [graphEvent, setGraphEvent] = useState<GraphEvent>(null);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [turnIndex, setTurnIndex] = useState(0);
   const [isBusy, setIsBusy] = useState(false);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const autoplayArmed = useRef(false);
+
   const schedule = useCallback((fn: () => void, ms: number) => {
     const t = setTimeout(fn, ms);
     timers.current.push(t);
   }, []);
+
   const isComplete = turnIndex >= turns.length;
   const nextChip = !isComplete ? turns[turnIndex].chip : undefined;
+
   const advance = useCallback(
     (userText: string) => {
       if (isBusy || isComplete) return;
+
       const turn = turns[turnIndex];
       setIsBusy(true);
+
       const pending: Message[] = [];
       if (turn.divider) {
         pending.push({
@@ -56,10 +63,24 @@ export function AppDemo() {
         role: 'user',
         content: userText || turn.userMessage,
       });
+
       setMessages((prev) => [...prev, ...pending]);
       if (turn.divider) setSessionLabel(turn.sessionLabel);
+
       const hasInterference =
-        turn.interferenceNodeIds && turn.interferenceNodeIds.length > 0;
+        !!turn.interferenceNodeIds && turn.interferenceNodeIds.length > 0;
+      const hasConsolidation =
+        !!turn.consolidationNodeIds && turn.consolidationNodeIds.length > 0;
+
+      const preSnapshotDelay =
+        turn.preSnapshotDelay ?? (hasInterference ? 2600 : 900);
+      const overlayDuration = turn.overlayDuration ?? 3000;
+      const replyDelay =
+        turn.replyDelay ?? (preSnapshotDelay + (hasConsolidation ? 600 : 250));
+      const dwellAfter = turn.dwellAfter ?? 0;
+
+      setFocusedNodeId(null);
+
       if (hasInterference) {
         schedule(() => {
           setNodes((prev) =>
@@ -75,7 +96,7 @@ export function AppDemo() {
           });
         }, 500);
       }
-      const snapshotDelay = hasInterference ? 2600 : 900;
+
       schedule(() => {
         setNodes(turn.nodes);
         setActiveMemories(turn.activeMemories);
@@ -83,9 +104,9 @@ export function AppDemo() {
         setBudgetUsed(turn.budgetUsed);
         setSessionLabel(turn.sessionLabel);
         if (hasInterference) setGraphEvent(null);
-      }, snapshotDelay);
-      const hasConsolidation =
-        turn.consolidationNodeIds && turn.consolidationNodeIds.length > 0;
+        if (turn.lineageFocusNodeId) setFocusedNodeId(turn.lineageFocusNodeId);
+      }, preSnapshotDelay);
+
       if (hasConsolidation) {
         schedule(() => {
           setGraphEvent({
@@ -93,10 +114,11 @@ export function AppDemo() {
             nodeIds: turn.consolidationNodeIds!,
             label: turn.consolidationLabel ?? 'Schema',
           });
-        }, snapshotDelay + 200);
-        schedule(() => setGraphEvent(null), snapshotDelay + 3000);
+        }, preSnapshotDelay + 200);
+
+        schedule(() => setGraphEvent(null), preSnapshotDelay + overlayDuration);
       }
-      const replyDelay = snapshotDelay + (hasConsolidation ? 600 : 250);
+
       schedule(() => {
         setMessages((prev) => [
           ...prev,
@@ -106,12 +128,28 @@ export function AppDemo() {
             content: turn.agentMessage,
           },
         ]);
+      }, replyDelay);
+
+      schedule(() => {
+        if (turn.lineageFocusNodeId) setFocusedNodeId(null);
         setTurnIndex((i) => i + 1);
         setIsBusy(false);
-      }, replyDelay);
+      }, replyDelay + dwellAfter);
     },
     [isBusy, isComplete, schedule, turnIndex]
   );
+
+  useEffect(() => {
+    if (autoplayArmed.current || isBusy || isComplete) return;
+    autoplayArmed.current = true;
+    schedule(() => advance(''), 800);
+  }, [advance, isBusy, isComplete, schedule]);
+
+  useEffect(() => {
+    if (!autoplayArmed.current || isBusy || isComplete || turnIndex === 0) return;
+    schedule(() => advance(''), 1200);
+  }, [advance, isBusy, isComplete, schedule, turnIndex]);
+
   const handleReplay = useCallback(() => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
@@ -122,9 +160,12 @@ export function AppDemo() {
     setBudgetUsed(INITIAL_BUDGET);
     setSessionLabel(INITIAL_SESSION_LABEL);
     setGraphEvent(null);
+    setFocusedNodeId(null);
     setTurnIndex(0);
     setIsBusy(false);
+    autoplayArmed.current = false;
   }, []);
+
   return (
     <div className="flex w-full h-screen bg-zinc-950 text-zinc-200 overflow-hidden font-sans selection:bg-emerald-500/30">
       <div className="w-[44%] min-w-[400px] h-full">
@@ -147,6 +188,7 @@ export function AppDemo() {
           budgetUsed={budgetUsed}
           budgetTotal={BUDGET_TOTAL}
           graphEvent={graphEvent}
+          focusedNodeId={focusedNodeId}
         />
       </div>
     </div>
